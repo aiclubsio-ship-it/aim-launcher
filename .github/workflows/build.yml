@@ -1,0 +1,219 @@
+name: Build APK
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Accept Android SDK licenses (preinstalled SDK)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+      - name: Generate project files
+        run: |
+          cat > settings.gradle.kts <<'AIM_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AimLauncherAndroid"
+          include(":app")
+          AIM_EOF
+          cat > build.gradle.kts <<'AIM_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          AIM_EOF
+          cat > gradle.properties <<'AIM_EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=false
+          kotlin.code.style=official
+          AIM_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'AIM_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.aimlauncher.mobile"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.aimlauncher.mobile"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          AIM_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'AIM_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <!-- Lets the app see launchable apps on Android 11+ without the broad QUERY_ALL_PACKAGES permission. -->
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+              <application android:label="Aim Launcher" android:theme="@style/AppTheme" android:allowBackup="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          AIM_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'AIM_EOF'
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#0E0E10</item>
+                  <item name="android:statusBarColor">#0E0E10</item>
+                  <item name="android:navigationBarColor">#0E0E10</item>
+              </style>
+          </resources>
+          AIM_EOF
+          mkdir -p app/src/main/java/com/aimlauncher/mobile
+          cat > app/src/main/java/com/aimlauncher/mobile/MainActivity.kt <<'AIM_EOF'
+          package com.aimlauncher.mobile
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ApplicationInfo
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.ArrayAdapter
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.TextView
+
+          /**
+           * Standalone launcher: lists apps installed on THIS phone, remembers your pick, and opens it
+           * like tapping its icon. It never touches, patches or injects into the other app.
+           */
+          class MainActivity : Activity() {
+              data class AppEntry(val label: String, val pkg: String)
+
+              private val red = Color.parseColor("#E10600")
+              private val panel = Color.parseColor("#202026")
+              private var apps = listOf<AppEntry>()
+              private var selected: String? = null
+              private lateinit var status: TextView
+              private lateinit var list: ListView
+              private lateinit var adapter: ArrayAdapter<AppEntry>
+              private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun styledButton(text: String, filled: Boolean, onClick: () -> Unit) = Button(this).apply {
+                  this.text = text; isAllCaps = false; setTextColor(Color.WHITE); textSize = 16f
+                  background = GradientDrawable().apply { cornerRadius = dp(10).toFloat(); setColor(if (filled) red else panel) }
+                  layoutParams = LinearLayout.LayoutParams(0, dp(52), 1f).apply { setMargins(dp(4), dp(8), dp(4), 0) }
+                  setOnClickListener { onClick() }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  selected = prefs.getString("selected", null)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#0E0E10"))
+                      setPadding(dp(20), dp(40), dp(20), dp(20))
+                  }
+                  root.addView(TextView(this).apply { text = "AIM LAUNCHER"; textSize = 26f; setTextColor(red); setTypeface(typeface, android.graphics.Typeface.BOLD) })
+                  root.addView(TextView(this).apply { text = "Pick your installed game, then tap Launch."; setTextColor(Color.parseColor("#8A8A93")); setPadding(0, 0, 0, dp(12)) })
+                  status = TextView(this).apply { setTextColor(Color.WHITE); setPadding(0, 0, 0, dp(8)) }
+                  root.addView(status)
+
+                  adapter = object : ArrayAdapter<AppEntry>(this, android.R.layout.simple_list_item_1, mutableListOf()) {
+                      override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                          val tv = super.getView(position, convertView, parent) as TextView
+                          val e = getItem(position)!!
+                          tv.text = "${e.label}\n${e.pkg}"; tv.textSize = 14f
+                          val sel = e.pkg == selected
+                          tv.setTextColor(Color.WHITE)
+                          tv.background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setColor(if (sel) red else panel) }
+                          return tv
+                      }
+                  }
+                  list = ListView(this).apply {
+                      this.adapter = this@MainActivity.adapter; divider = null; dividerHeight = dp(6)
+                      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+                      setOnItemClickListener { _, _, pos, _ ->
+                          selected = adapter.getItem(pos)!!.pkg
+                          prefs.edit().putString("selected", selected).apply()
+                          adapter.notifyDataSetChanged(); updateStatus()
+                      }
+                  }
+                  root.addView(list)
+
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+                  row.addView(styledButton("Refresh", false) { loadApps() })
+                  row.addView(styledButton("Launch game", true) { launchSelected() })
+                  root.addView(row)
+                  setContentView(root)
+                  loadApps()
+              }
+
+              private fun loadApps() {
+                  val pm = packageManager
+                  val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  apps = pm.queryIntentActivities(main, 0)
+                      .map { it.activityInfo.applicationInfo }
+                      .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 && it.packageName != packageName }
+                      .distinctBy { it.packageName }
+                      .map { AppEntry(pm.getApplicationLabel(it).toString(), it.packageName) }
+                      .sortedBy { it.label.lowercase() }
+                  adapter.clear(); adapter.addAll(apps); adapter.notifyDataSetChanged()
+                  updateStatus()
+              }
+
+              private fun updateStatus() {
+                  val sel = apps.firstOrNull { it.pkg == selected }
+                  status.text = when {
+                      sel != null -> "Selected: ${sel.label}"
+                      selected != null -> "Saved game not found on this phone. Pick again."
+                      else -> "No game selected yet."
+                  }
+              }
+
+              private fun launchSelected() {
+                  val pkg = selected
+                  if (pkg == null) { status.text = "Select your game first."; return }
+                  val intent = packageManager.getLaunchIntentForPackage(pkg)
+                  if (intent == null) { status.text = "Can't open $pkg (is it installed?)."; return }
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  startActivity(intent)
+              }
+          }
+          AIM_EOF
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AimLauncher.apk
+          gh release create "v${{ github.run_number }}" AimLauncher.apk --repo "${{ github.repository }}" --title "Aim Launcher build ${{ github.run_number }}" --notes "Debug APK for Android"
